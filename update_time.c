@@ -1,88 +1,88 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 #include <time.h>
 #include <sys/time.h>
-#include <errno.h>
+#include <curl/curl.h>
 
-#define NTP_SERVER "pool.ntp.org"
-#define NTP_PORT 123
-#define NTP_TIMESTAMP_DELTA 2208988800ULL
+struct MemoryStruct {
+    char *memory;
+    size_t size;
+};
 
-typedef struct {
-    uint8_t li_vn_mode;
-    uint8_t stratum;
-    uint8_t poll;
-    uint8_t precision;
-    uint32_t root_delay;
-    uint32_t root_dispersion;
-    uint32_t ref_id;
-    uint32_t ref_ts_sec;
-    uint32_t ref_ts_frac;
-    uint32_t orig_ts_sec;
-    uint32_t orig_ts_frac;
-    uint32_t recv_ts_sec;
-    uint32_t recv_ts_frac;
-    uint32_t trans_ts_sec;
-    uint32_t trans_ts_frac;
-} ntp_packet;
+size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    struct MemoryStruct *mem = (struct MemoryStruct *)userp;
+    char *ptr = realloc(mem->memory, mem->size + realsize + 1);
+    if (ptr == NULL) {
+        return 0;
+    }
+    mem->memory = ptr;
+    memcpy(&(mem->memory[mem->size]), contents, realsize);
+    mem->size += realsize;
+    mem->memory[mem->size] = 0;
+    return realsize;
+}
 
 int main() {
-    int sockfd;
-    struct sockaddr_in server_addr;
-    ntp_packet packet = {0};
-    ssize_t n;
+    CURL *curl;
+    CURLcode res;
+    struct MemoryStruct chunk;
 
-    // Create UDP socket
-    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sockfd < 0) {
-        perror("socket");
+    chunk.memory = malloc(1);
+    chunk.size = 0;
+
+    curl = curl_easy_init();
+    if (!curl) {
+        fprintf(stderr, "curl_easy_init() failed\n");
+        free(chunk.memory);
         return 1;
     }
 
-    // Resolve server address
-    struct addrinfo hints, *res;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_protocol = IPPROTO_UDP;
-    if (getaddrinfo(NTP_SERVER, "123", &hints, &res) != 0) {
-        perror("getaddrinfo");
-        close(sockfd);
-        return 1;
-    }
-    server_addr = *(struct sockaddr_in *)res->ai_addr;
-    freeaddrinfo(res);
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.keybit.ir/time/");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
 
-    // Initialize NTP packet
-    packet.li_vn_mode = 0x1b;  // LI=0, VN=3, Mode=3 (client)
-
-    // Send packet
-    n = sendto(sockfd, &packet, sizeof(packet), 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
-    if (n < 0) {
-        perror("sendto");
-        close(sockfd);
+    res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        curl_easy_cleanup(curl);
+        free(chunk.memory);
         return 1;
     }
 
-    // Receive response
-    n = recvfrom(sockfd, &packet, sizeof(packet), 0, NULL, NULL);
-    if (n < 0) {
-        perror("recvfrom");
-        close(sockfd);
+    curl_easy_cleanup(curl);
+
+    // Parse JSON for unix.en
+    char *unix_start = strstr(chunk.memory, "\"unix\":");
+    if (!unix_start) {
+        fprintf(stderr, "Unix not found in response\n");
+        free(chunk.memory);
         return 1;
     }
 
-    close(sockfd);
+    char *unix_en = strstr(unix_start, "\"en\":");
+    if (!unix_en) {
+        fprintf(stderr, "Unix en not found\n");
+        free(chunk.memory);
+        return 1;
+    }
+    unix_en += 5; // skip "en":
 
-    // Convert NTP time to Unix time
-    uint32_t ntp_sec = ntohl(packet.trans_ts_sec);
-    time_t unix_time = (time_t)(ntp_sec - NTP_TIMESTAMP_DELTA);
+    char *unix_end = strchr(unix_en, ',');
+    if (!unix_end) unix_end = strchr(unix_en, '\n');
+    if (!unix_end) unix_end = strchr(unix_en, '}');
+    if (!unix_end) {
+        fprintf(stderr, "Invalid unix format\n");
+        free(chunk.memory);
+        return 1;
+    }
+    *unix_end = '\0';
+
+    long long unix_time_ll = atoll(unix_en);
+    time_t unix_time = (time_t)unix_time_ll;
 
     // Set system time
     struct timeval tv;
@@ -90,9 +90,11 @@ int main() {
     tv.tv_usec = 0;
     if (settimeofday(&tv, NULL) < 0) {
         perror("settimeofday");
+        free(chunk.memory);
         return 1;
     }
 
     printf("System time updated successfully.\n");
+    free(chunk.memory);
     return 0;
 }

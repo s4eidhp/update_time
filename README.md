@@ -52,8 +52,9 @@ To test manually:
 ## Requirements
 - GCC for compilation
 - Make for building
+- libcurl for HTTP requests (install with `sudo apt install libcurl4-openssl-dev` on Debian/Ubuntu)
 - Root privileges for setting system time and installing the binary
-- Internet connection for NTP
+- Internet connection
 
 ## Makefile targets
 - `make`: Compile the program
